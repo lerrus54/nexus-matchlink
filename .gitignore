@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Виртуальное окружение
+.venv/
+
+# Логи и личные настройки
+logs/
+config/settings.json
+
+# Артефакты сборки .exe
+build/
+dist/
+*.spec
+
+# Среды разработки
+.idea/
