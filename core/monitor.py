@@ -15,7 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from detector.matcher import ButtonDetector
+from detector.matcher import ButtonDetector, _frame_is_black
+from detector.screen import capture as capture_screen
 from detector.screen import capture_window
 from notifier.base import BaseNotifier
 
@@ -165,8 +166,9 @@ class MatchMonitor:
         """Скриншот окна игры для уведомления (None, если не получилось).
 
         Окно предварительно разворачивается (без фокуса), чтобы свёрнутая
-        игра успела отрисовать кадр. Файл сохраняется в
-        ``self._screenshot_dir`` и возвращается его путь.
+        игра успела отрисовать кадр. Если PrintWindow вернул чёрный кадр
+        (DX11 в эксклюзивном полноэкранном режиме, например CS2) — берётся
+        захват всего экрана. Файл сохраняется в ``self._screenshot_dir``.
         """
         # Ленивый импорт: core.clicker тянет detector — см. matcher.locate_for.
         from core.clicker import find_game_window, restore_window_no_activate
@@ -177,6 +179,8 @@ class MatchMonitor:
                 return None
             restore_window_no_activate(hwnd)
             image = capture_window(hwnd)
+            if image is None or _frame_is_black(image):
+                image = capture_screen()
             if image is None:
                 return None
             directory = Path(self._screenshot_dir)

@@ -68,6 +68,18 @@ def _to_gray(image: Image.Image) -> np.ndarray:
     return np.asarray(image.convert("L"), dtype=np.uint8)
 
 
+# Порог разброса яркости, ниже которого кадр считается «чёрным»:
+# PrintWindow часто возвращает пустой кадр для DX11-игр в эксклюзивном
+# полноэкранном режиме (CS2), даже когда игра активна и видна на экране.
+BLACK_FRAME_STD = 2.0
+
+
+def _frame_is_black(image: Image.Image) -> bool:
+    """True, если на кадре ничего не отрисовано (дисперсия ≈ 0)."""
+    gray = _to_gray(image)
+    return float(gray.std()) < BLACK_FRAME_STD
+
+
 def _resize_gray(image: Image.Image, new_width: int, new_height: int) -> np.ndarray:
     """Уменьшает grayscale-изображение билинейной интерполяцией."""
     if new_width < 1 or new_height < 1:
@@ -159,23 +171,33 @@ class ButtonDetector:
 
         Захват через PrintWindow берёт содержимое самого окна игры,
         поэтому кнопка находится, даже если игра лежит под другими
-        окнами. Если ``restore_minimized`` (при удалённом приёме), свёрнутое
-        окно предварительно разворачивается без перехвата фокуса.
-        Свёрнутая игра не рендерит кадры (особенно Source 2 / CS2) —
-        PrintWindow вернёт чёрный кадр, и кнопка не найдётся, поэтому
-        свёрнутое окно разворачивается в любом случае, даже при фоновом
-        сканировании: разворачивание происходит один раз (после этого
-        окно уже не свёрнуто), без перехвата фокуса.
+        окнами. Но для DX11 в эксклюзивном полноэкранном режиме (CS2)
+        PrintWindow возвращает пустой кадр — тогда поиск идёт по захвату
+        всего экрана. Свёрнутая игра не рендерит кадры вовсе: окно
+        сначала разворачивается без фокуса (для игр, которые рисуют и так,
+        этого достаточно), а если кадр всё равно пуст — активируется через
+        ``focus_window``, чтобы движок начал рисовать. Активация случается
+        один раз: после неё окно уже не свёрнуто.
 
         Возвращает регион в координатах ЭКРАНА (как и ``locate``).
         """
         # Ленивый импорт: core.clicker тянет core.monitor -> detector,
         # поэтому импорт на уровне модуля даёт циклическую зависимость.
-        from core.clicker import find_game_window, is_window_minimized, restore_window_no_activate
+        from core.clicker import (
+            find_game_window,
+            focus_window,
+            is_window_minimized,
+            restore_window_no_activate,
+        )
 
         hwnd = find_game_window(window_hints, exe_hints)
         if hwnd is not None:
-            if restore_minimized or is_window_minimized(hwnd):
+            restored_minimized = False
+            if is_window_minimized(hwnd):
+                # Сначала разворачиваем без фокуса (Dota рендерит и так).
+                restore_window_no_activate(hwnd)
+                restored_minimized = True
+            elif restore_minimized:
                 restore_window_no_activate(hwnd)
             try:
                 window_image = capture_window(hwnd)
@@ -183,6 +205,14 @@ class ButtonDetector:
                 logger.exception("Не удалось захватить окно игры")
                 window_image = None
             if window_image is not None:
+                if _frame_is_black(window_image):
+                    # PrintWindow пуст: DX11 в эксклюзивном полноэкранном
+                    # режиме (CS2) не отдаёт кадр через окно. Если игра
+                    # была свёрнута — она вообще не рисует без активации,
+                    # поэтому фокусируем окно и ищем по экрану.
+                    if restored_minimized:
+                        focus_window(hwnd)
+                    return self.locate()
                 region = self._locate_in(_to_gray(window_image))
                 if region is not None:
                     x, y, width, height = region
