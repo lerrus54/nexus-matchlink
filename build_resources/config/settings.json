@@ -1,0 +1,32 @@
+{
+  "selected_game": "Dota 2",
+  "games": {
+    "Dota 2": {
+      "image_path": "images/accept.png",
+      "confidence": 0.8,
+      "search_region": null,
+      "window_hints": ["dota 2"],
+      "exe_hints": ["dota2.exe"]
+    },
+    "CS2": {
+      "image_path": "images/accept_cs2.png",
+      "confidence": 0.8,
+      "search_region": null,
+      "window_hints": ["counter-strike"],
+      "exe_hints": ["cs2.exe"]
+    }
+  },
+  "check_interval": 1.0,
+  "log_dir": "logs",
+  "telegram": {
+    "enabled": true,
+    "bot_token": "",
+    "chat_id": 0,
+    "accept_enabled": true,
+    "send_screenshot": false
+  },
+  "sound": {
+    "enabled": true,
+    "repeats": 3
+  }
+}

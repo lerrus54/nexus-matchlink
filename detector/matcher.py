@@ -160,20 +160,22 @@ class ButtonDetector:
         Захват через PrintWindow берёт содержимое самого окна игры,
         поэтому кнопка находится, даже если игра лежит под другими
         окнами. Если ``restore_minimized`` (при удалённом приёме), свёрнутое
-        окно предварительно разворачивается без перехвата фокуса —
-        свёрнутая игра не рендерит кадры. При фоновом сканировании
-        монитора флаг выключен, чтобы не разворачивать игру каждую
-        секунду.
+        окно предварительно разворачивается без перехвата фокуса.
+        Свёрнутая игра не рендерит кадры (особенно Source 2 / CS2) —
+        PrintWindow вернёт чёрный кадр, и кнопка не найдётся, поэтому
+        свёрнутое окно разворачивается в любом случае, даже при фоновом
+        сканировании: разворачивание происходит один раз (после этого
+        окно уже не свёрнуто), без перехвата фокуса.
 
         Возвращает регион в координатах ЭКРАНА (как и ``locate``).
         """
         # Ленивый импорт: core.clicker тянет core.monitor -> detector,
         # поэтому импорт на уровне модуля даёт циклическую зависимость.
-        from core.clicker import find_game_window, restore_window_no_activate
+        from core.clicker import find_game_window, is_window_minimized, restore_window_no_activate
 
         hwnd = find_game_window(window_hints, exe_hints)
         if hwnd is not None:
-            if restore_minimized:
+            if restore_minimized or is_window_minimized(hwnd):
                 restore_window_no_activate(hwnd)
             try:
                 window_image = capture_window(hwnd)
