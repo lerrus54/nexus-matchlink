@@ -69,6 +69,7 @@ class MatchMonitor:
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self.last_message_id: Optional[int] = None
 
     @property
     def is_running(self) -> bool:
@@ -144,7 +145,9 @@ class MatchMonitor:
                     screenshot = (
                         self._capture_screenshot() if self._send_screenshot else None
                     )
-                    self._notify(build_message(self._game_name), image_path=screenshot)
+                    self.last_message_id = self._notify(
+                        build_message(self._game_name), image_path=screenshot
+                    )
                     self._emit(self.on_match_found)
                     match_detected = True
             else:
@@ -158,14 +161,19 @@ class MatchMonitor:
             # wait() вместо sleep() делает остановку мгновенной
             self._stop_event.wait(self._check_interval)
 
-    def _notify(self, message: str, image_path: Optional[str] = None) -> None:
+    def _notify(self, message: str, image_path: Optional[str] = None) -> Optional[int]:
+        first_message_id: Optional[int] = None
         for notifier in self._notifiers:
             try:
-                notifier.notify(message, image_path=image_path)
+                result = notifier.notify(message, image_path=image_path)
             except Exception as exc:
                 logger.error(
                     "Ошибка уведомителя %s: %s", type(notifier).__name__, exc
                 )
+                continue
+            if first_message_id is None and result is not None:
+                first_message_id = result
+        return first_message_id
 
     def _capture_screenshot(self) -> Optional[str]:
         """Скриншот окна игры для уведомления (None, если не получилось).

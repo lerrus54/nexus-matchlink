@@ -19,11 +19,15 @@ class BaseNotifier(ABC):
         """Включён ли канал (по настройкам пользователя)."""
 
     @abstractmethod
-    def notify(self, message: str, image_path: Optional[str] = None) -> None:
+    def notify(self, message: str, image_path: Optional[str] = None) -> Optional[int]:
         """Отправляет уведомление о найденном матче.
 
         ``image_path`` — необязательный скриншот кнопки приёма; каналы,
         не умеющие картинки (звук), игнорируют его.
+
+        Возвращает идентификатор отправленного сообщения (message_id)
+        для последующего обновления, или None, если канал не поддерживает
+        идентификаторы либо сообщение не отправилось.
         """
 
     def notify_test(self, message: str) -> None:

@@ -23,6 +23,7 @@ from config import Config, resolve_path, save_config, writable_root
 from core.clicker import ClickError, bring_game_to_front, click_at
 from core.monitor import MatchMonitor
 from core.stats import MatchStats
+from core.updater import UpdateInfo, check_for_update
 from core.version import APP_VERSION
 from detector.matcher import ButtonDetector
 from gui.telegram_dialog import TelegramConnectDialog
@@ -112,6 +113,9 @@ class Application(ctk.CTk):
         self._pending_match = False
         self._monitor_started_at: Optional[float] = None
         self._stats_job: Optional[str] = None
+        self._last_match_msg_id: Optional[int] = None
+        self._update_info: Optional[UpdateInfo] = None
+        self._update_checked: Optional[bool] = None
 
         ctk.set_appearance_mode("dark")
         try:
@@ -138,6 +142,7 @@ class Application(ctk.CTk):
             )
         self._start_accept_listener()
         self._schedule_stats_refresh()
+        self._check_updates_async()
 
     # ---------- построение интерфейса ----------
 
@@ -461,6 +466,9 @@ class Application(ctk.CTk):
         self.status_dot.configure(text_color=NEON_MAGENTA)
         self._pending_match = True
         self._stats.record_found()
+        self._last_match_msg_id = (
+            self._monitor.last_message_id if self._monitor is not None else None
+        )
         self._refresh_stats()
         if self._accept_listener is not None and self._accept_listener.is_running:
             self._log_event("Матч найден! Кнопка приёма отправлена в Telegram.")
@@ -473,6 +481,7 @@ class Application(ctk.CTk):
         if self._pending_match:
             self._pending_match = False
             self._stats.record_missed()
+            self._mark_match_message(TelegramNotifier.MISSED_MARKUP)
             self._refresh_stats()
         self._refresh_status()
 
@@ -617,6 +626,7 @@ class Application(ctk.CTk):
             self._schedule(lambda: self._log_event("Кнопка принятия нажата."))
             self._pending_match = False
             self._stats.record_accepted()
+            self._mark_match_message(TelegramNotifier.ACCEPTED_MARKUP)
             self._schedule(self._refresh_stats)
             self._telegram_result(ACCEPT_ANSWER_OK.format(game=self._config.game_name))
         except ClickError as exc:
@@ -640,6 +650,49 @@ class Application(ctk.CTk):
             daemon=True,
         ).start()
 
+    def _mark_match_message(self, reply_markup: str) -> None:
+        """Меняет кнопки у последнего уведомления о матче (в фоновом потоке).
+
+        После приёма кнопка становится «✅ МАТЧ ПРИНЯТ», при пропуске —
+        «⏳ МАТЧ ПРОПУЩЕН», чтобы в чате было видно исход без лишних слов.
+        """
+        if self._telegram is None or not self._telegram.enabled:
+            return
+        if not self._last_match_msg_id:
+            return
+        threading.Thread(
+            target=self._telegram.edit_reply_markup,
+            args=(self._last_match_msg_id, reply_markup),
+            name="telegram-markup",
+            daemon=True,
+        ).start()
+
+    # ---------- проверка обновлений ----------
+
+    def _check_updates_async(self) -> None:
+        """Проверяет обновления в фоновом потоке (интерфейс не блокируется)."""
+        threading.Thread(
+            target=self._update_worker, name="update-check", daemon=True
+        ).start()
+
+    def _update_worker(self) -> None:
+        info: Optional[UpdateInfo] = None
+        ok = False
+        try:
+            info = check_for_update(APP_VERSION)
+            ok = True
+        except Exception as exc:
+            logger.debug("Проверка обновлений упала: %s", exc)
+        self._schedule(lambda: self._on_update_checked(info, ok))
+
+    def _on_update_checked(self, info: Optional[UpdateInfo], ok: bool) -> None:
+        self._update_info = info if ok else None
+        self._update_checked = ok
+        if ok and info is not None:
+            self._log_event(
+                f"Доступна новая версия v{info.version}! Скачать: {info.url}"
+            )
+
     # ---------- команды бота ----------
 
     def _on_telegram_message(self, text: str) -> Optional[str]:
@@ -655,11 +708,23 @@ class Application(ctk.CTk):
         if command in ("/help", "/commands"):
             return self._help_text()
         if command == "/version":
-            return f"⚙️ Nexus Matchlink v{APP_VERSION}"
+            reply = f"⚙️ Nexus Matchlink v{APP_VERSION}"
+            if self._update_info is not None:
+                reply += (
+                    f"\n🔔 Доступно обновление: v{self._update_info.version}"
+                    f"\n{self._update_info.url}"
+                )
+            return reply
+        if command == "/update":
+            return self._update_text()
         if command == "/status":
             return self._status_text()
         if command == "/stats":
             return self._stats_text()
+        if command == "/links":
+            return self._links_text()
+        if command == "/ping":
+            return "🏓 pong — бот на связи."
         if command == "/test":
             self._schedule(self._on_test)
             return "📡 Тестовое уведомление отправлено."
@@ -677,7 +742,10 @@ class Application(ctk.CTk):
             "/stats — статистика матчей\n"
             "/accept — принять текущий матч\n"
             "/test — тестовое уведомление\n"
+            "/update — проверить обновления\n"
+            "/links — канал, код, сайт\n"
             "/version — версия приложения\n"
+            "/ping — проверка связи с ботом\n"
             "/help — эта справка\n\n"
             "Матч также можно принять, нажав кнопку под уведомлением."
         )
@@ -697,13 +765,44 @@ class Application(ctk.CTk):
 
     def _stats_text(self) -> str:
         stats = self._stats.snapshot()
+        found = int(stats["matches_found"])
+        accepted = int(stats["matches_accepted"])
+        rate = round(100.0 * accepted / found) if found else 0
         return (
             f"📊 Статистика\n\n"
-            f"Найдено матчей: {stats['matches_found']}\n"
-            f"Принято: {stats['matches_accepted']}\n"
+            f"Найдено матчей: {found}\n"
+            f"Принято: {accepted}\n"
             f"Упущено: {stats['matches_missed']}\n"
+            f"Процент приёма: {rate}%\n"
             f"Последний матч: {stats['last_match_at'] or '—'}"
         )
+
+    @staticmethod
+    def _links_text() -> str:
+        return (
+            "🔗 Полезные ссылки\n\n"
+            "📢 Канал с релизами: t.me/nexus_matchlink\n"
+            "💻 Исходный код: github.com/lerrus54/nexus-matchlink\n"
+            "🌐 Сайт: lerrus54.github.io/nexus-matchlink"
+        )
+
+    def _update_text(self) -> str:
+        if self._update_checked is None:
+            return "⏳ Проверка обновлений ещё не завершилась. Попробуйте позже."
+        if not self._update_checked:
+            return (
+                "⚠️ Не удалось проверить обновления (нет сети или GitHub "
+                "недоступен). Актуальную версию всегда можно взять в канале: "
+                "t.me/nexus_matchlink"
+            )
+        if self._update_info is not None:
+            info = self._update_info
+            notes = f"\n\n{info.notes}" if info.notes else ""
+            return (
+                f"🔔 Доступна новая версия v{info.version}!\n\n"
+                f"{notes}\n\nСкачать: {info.url}"
+            )
+        return f"✅ У вас актуальная версия v{APP_VERSION}."
 
     def _monitor_uptime(self) -> str:
         if self._monitor_started_at is None:
@@ -780,8 +879,12 @@ class Application(ctk.CTk):
         )
 
     def _schedule_stats_refresh(self) -> None:
-        """Периодически обновляет статистику (после удалённых действий)."""
+        """Периодически обновляет статистику и следит за слушателем Telegram."""
         self._refresh_stats()
+        if self._telegram_ready():
+            if self._accept_listener is None or not self._accept_listener.is_running:
+                self._log_event("Слушатель Telegram не отвечает — перезапускаю.")
+                self._start_accept_listener()
         self._stats_job = self.after(2000, self._schedule_stats_refresh)
 
     # ---------- внутренние помощники ----------

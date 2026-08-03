@@ -160,12 +160,22 @@ class TelegramNotifier(BaseNotifier):
 
     API_URL = "https://api.telegram.org/bot{token}/sendMessage"
     PHOTO_URL = "https://api.telegram.org/bot{token}/sendPhoto"
+    EDIT_MARKUP_URL = "https://api.telegram.org/bot{token}/editMessageReplyMarkup"
     REQUEST_TIMEOUT = 5
 
     ACCEPT_CALLBACK = "accept_match"
+    NOOP_CALLBACK = "accept_done"
     ACCEPT_BUTTON_TEXT = "✅ ПРИНЯТЬ МАТЧ"
+    ACCEPTED_BUTTON_TEXT = "✅ МАТЧ ПРИНЯТ"
+    MISSED_BUTTON_TEXT = "⏳ МАТЧ ПРОПУЩЕН"
     _ACCEPT_MARKUP = json.dumps(
         {"inline_keyboard": [[{"text": ACCEPT_BUTTON_TEXT, "callback_data": ACCEPT_CALLBACK}]]}
+    )
+    _ACCEPTED_MARKUP = json.dumps(
+        {"inline_keyboard": [[{"text": ACCEPTED_BUTTON_TEXT, "callback_data": NOOP_CALLBACK}]]}
+    )
+    _MISSED_MARKUP = json.dumps(
+        {"inline_keyboard": [[{"text": MISSED_BUTTON_TEXT, "callback_data": NOOP_CALLBACK}]]}
     )
 
     def __init__(self, settings: TelegramSettings) -> None:
@@ -179,14 +189,14 @@ class TelegramNotifier(BaseNotifier):
     def accept_enabled(self) -> bool:
         return self._settings.accept_enabled
 
-    def send(self, text: str, reply_markup: Optional[str] = None) -> bool:
-        """Отправляет сообщение (reply_markup — JSON-строка клавиатуры)."""
+    def send(self, text: str, reply_markup: Optional[str] = None) -> Optional[int]:
+        """Отправляет сообщение; возвращает message_id или None."""
         if not self._settings.enabled:
             logger.debug("Telegram-уведомления отключены в настройках")
-            return False
+            return None
         if not self._settings.bot_token or not self._settings.chat_id:
             logger.error("Не задан bot_token или chat_id в настройках")
-            return False
+            return None
 
         url = self.API_URL.format(token=self._settings.bot_token)
         payload: dict[str, Any] = {
@@ -199,16 +209,19 @@ class TelegramNotifier(BaseNotifier):
             response = requests.post(url, data=payload, timeout=self.REQUEST_TIMEOUT)
         except requests.RequestException as exc:
             logger.error("Сетевая ошибка при отправке в Telegram: %s", exc)
-            return False
+            return None
 
         if response.status_code == 200:
             logger.info("Уведомление в Telegram отправлено")
-            return True
+            try:
+                return int(response.json()["result"]["message_id"])
+            except (ValueError, KeyError, TypeError):
+                return None
 
         logger.error(
             "Telegram вернул статус %s: %s", response.status_code, response.text
         )
-        return False
+        return None
 
     def send_photo(
         self,
@@ -216,8 +229,8 @@ class TelegramNotifier(BaseNotifier):
         caption: str,
         image_path: str,
         reply_markup: Optional[str] = None,
-    ) -> bool:
-        """Отправляет скриншот с подписью (multipart-загрузка файла)."""
+    ) -> Optional[int]:
+        """Отправляет скриншот с подписью; возвращает message_id или None."""
         try:
             with open(image_path, "rb") as file_handle:
                 files = {
@@ -233,21 +246,54 @@ class TelegramNotifier(BaseNotifier):
                 response = requests.post(url, data=payload, files=files, timeout=self.REQUEST_TIMEOUT)
         except OSError as exc:
             logger.error("Не удалось открыть скриншот %s: %s", image_path, exc)
-            return False
+            return None
 
         if response.status_code == 200:
             logger.info("Скриншот матча отправлен в Telegram")
-            return True
+            try:
+                return int(response.json()["result"]["message_id"])
+            except (ValueError, KeyError, TypeError):
+                return None
 
         logger.error(
             "Telegram вернул статус %s при отправке фото: %s",
             response.status_code,
             response.text,
         )
+        return None
+
+    def edit_reply_markup(self, message_id: int, reply_markup: str) -> bool:
+        """Заменяет кнопки у уже отправленного сообщения (например, на «ПРИНЯТО»)."""
+        try:
+            url = self.EDIT_MARKUP_URL.format(token=self._settings.bot_token)
+            response = requests.post(
+                url,
+                data={
+                    "chat_id": self._settings.chat_id,
+                    "message_id": message_id,
+                    "reply_markup": reply_markup,
+                },
+                timeout=self.REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("Сетевая ошибка при обновлении кнопок: %s", exc)
+            return False
+        if response.status_code == 200:
+            logger.info("Кнопки сообщения %s обновлены", message_id)
+            return True
+        logger.error(
+            "Telegram вернул статус %s при обновлении кнопок: %s",
+            response.status_code,
+            response.text,
+        )
         return False
 
-    def notify(self, message: str, image_path: Optional[str] = None) -> None:
-        """Матч найден: отправляем скриншот (если есть) и кнопку приёма."""
+    def notify(self, message: str, image_path: Optional[str] = None) -> Optional[int]:
+        """Матч найден: отправляем скриншот (если есть) и кнопку приёма.
+
+        Возвращает message_id отправленного сообщения (для последующего
+        обновления кнопки) или None, если отправить не удалось.
+        """
         markup = self._ACCEPT_MARKUP if self.accept_enabled else None
         if image_path:
             return self.send_photo(
@@ -380,6 +426,8 @@ class TelegramListener:
             # не должен задерживать клик. Ответ кнопке идёт параллельно.
             self._emit(self._on_accept)
             self._answer(query_id, "🎮 Принимаю игру...")
+        elif data == TelegramNotifier.NOOP_CALLBACK:
+            self._answer(query_id, "✅ Матч уже принят.")
         else:
             self._answer(query_id, "Неизвестная команда.")
 

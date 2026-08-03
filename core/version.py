@@ -4,6 +4,6 @@
 публикации обновлений (tools/publish_update.py).
 """
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 __all__ = ["APP_VERSION"]
