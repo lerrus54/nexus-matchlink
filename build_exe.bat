@@ -18,7 +18,7 @@ if errorlevel 1 goto :fail
 echo [2/3] Staging clean config template...
 rmdir /s /q build_resources 2>nul
 mkdir build_resources\config
-copy /y config\settings.template.json build_resources\config\settings.json >nul
+".venv\Scripts\python.exe" tools\stage_config.py
 if errorlevel 1 goto :fail
 
 echo [3/3] Building...
