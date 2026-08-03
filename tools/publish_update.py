@@ -18,6 +18,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import load_config
+from core.version import APP_VERSION
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def publish(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Публикация обновления в канал Nexus Matchlink")
     parser.add_argument("file", type=Path, help="путь к .exe/архиву для публикации")
-    parser.add_argument("--version", default="", help="версия, например v1.4.1")
+    parser.add_argument("--version", default=APP_VERSION, help="версия, например v1.4.1")
     parser.add_argument("--text", default="", help="что нового (строка)")
     parser.add_argument("--chat", default=DEFAULT_CHANNEL, help="канал или id")
     args = parser.parse_args(argv)
@@ -79,7 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("bot_token пуст — заполните config/settings.json")
         return 1
 
-    lines = ["NexusMatchlink " + args.version.strip()] if args.version.strip() else []
+    version = args.version.strip()
+    if version and not version.startswith("v"):
+        version = "v" + version
+    lines = ["NexusMatchlink " + version] if version else []
     if args.text.strip():
         lines.append(args.text.strip())
     caption = "\n".join(lines).strip()

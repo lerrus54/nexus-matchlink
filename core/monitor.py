@@ -31,7 +31,8 @@ MATCH_LOST_FRAMES = 2
 
 def build_message(game_name: str) -> str:
     """Формирует текст уведомления о найденном матче."""
-    return f"🎮 {game_name}\n\nМатч найден!\nСкорее принимай игру!"
+    sent_at = datetime.now().strftime("%H:%M:%S")
+    return f"🎮 {game_name}\n\n⚡ Матч найден!\nСкорее принимай игру! [{sent_at}]"
 
 
 class MatchMonitor:
@@ -95,6 +96,10 @@ class MatchMonitor:
     def set_notifiers(self, notifiers: list[BaseNotifier]) -> None:
         """Обновляет каналы уведомлений на лету (например, после подключения TG)."""
         self._notifiers = list(notifiers)
+
+    def set_send_screenshot(self, value: bool) -> None:
+        """Включает/выключает отправку скриншота в уведомлениях на лету."""
+        self._send_screenshot = bool(value)
 
     def wait(self, timeout: Optional[float] = None) -> None:
         """Блокирует текущий поток до остановки мониторинга.

@@ -19,9 +19,11 @@ from PIL import Image
 
 import customtkinter as ctk
 
-from config import Config, resolve_path, save_config
+from config import Config, resolve_path, save_config, writable_root
 from core.clicker import ClickError, bring_game_to_front, click_at
 from core.monitor import MatchMonitor
+from core.stats import MatchStats
+from core.version import APP_VERSION
 from detector.matcher import ButtonDetector
 from gui.telegram_dialog import TelegramConnectDialog
 from notifier import (
@@ -55,10 +57,10 @@ MUTED = "#8a94ab"
 FOOTER = "#4a5568"
 ON_ACCENT = "#061214"
 
-WINDOW_SIZE = "600x704"
+WINDOW_SIZE = "600x800"
 APP_TITLE = "NEXUS MATCHLINK"
 APP_SUBTITLE = "NEURAL MATCH DETECTOR // MULTI-GAME UPLINK"
-APP_FOOTER = "NEXUS TERMINAL v0.4 // SYSTEM NOMINAL"
+APP_FOOTER = f"NEXUS TERMINAL v{APP_VERSION} // SYSTEM NOMINAL"
 TEST_MESSAGE = "Тест уведомления из Nexus Matchlink."
 
 # Ответы бота при удалённом приёме матча. {game} — выбранная игра
@@ -106,6 +108,10 @@ class Application(ctk.CTk):
         self._accepting = False
         self._anim_job: Optional[str] = None
         self._dot_on = False
+        self._stats = MatchStats(writable_root() / "stats.json")
+        self._pending_match = False
+        self._monitor_started_at: Optional[float] = None
+        self._stats_job: Optional[str] = None
 
         ctk.set_appearance_mode("dark")
         try:
@@ -130,6 +136,8 @@ class Application(ctk.CTk):
             self._log_event(
                 "Telegram не подключён: нажмите «CONNECT TG» и отправьте код боту."
             )
+        self._start_accept_listener()
+        self._schedule_stats_refresh()
 
     # ---------- построение интерфейса ----------
 
@@ -276,6 +284,37 @@ class Application(ctk.CTk):
         )
         self.stop_button.grid(row=2, column=3, padx=(0, 14), pady=14)
 
+        self.shot_button = ctk.CTkButton(
+            controls,
+            text="SCREENSHOT: OFF",
+            command=lambda: self._on_toggle("screenshot"),
+            width=150,
+            fg_color="transparent",
+            hover_color="#1c2332",
+            border_width=2,
+            border_color=MUTED,
+            text_color=MUTED,
+            font=_mono(10, bold=True),
+            corner_radius=8,
+        )
+        self.shot_button.grid(row=3, column=1, padx=(8, 6), pady=(0, 12), sticky="w")
+
+        self.sound_button = ctk.CTkButton(
+            controls,
+            text="SOUND: ON",
+            command=lambda: self._on_toggle("sound"),
+            width=150,
+            fg_color="transparent",
+            hover_color="#1c2332",
+            border_width=2,
+            border_color=MUTED,
+            text_color=MUTED,
+            font=_mono(10, bold=True),
+            corner_radius=8,
+        )
+        self.sound_button.grid(row=3, column=2, padx=(0, 6), pady=(0, 12), sticky="w")
+        self._update_toggle_buttons()
+
     def _build_status(self, row: int) -> None:
         status = self._build_section_card("SYSTEM STATUS")
         status.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="ew")
@@ -336,6 +375,18 @@ class Application(ctk.CTk):
         )
         self.connect_button.grid(row=3, column=3, padx=14, pady=(0, 12), sticky="e")
 
+        self.stats_label = ctk.CTkLabel(
+            status,
+            text="",
+            font=_mono(11, bold=True),
+            text_color=MUTED,
+            anchor="w",
+        )
+        self.stats_label.grid(
+            row=4, column=0, columnspan=4, padx=14, pady=(0, 12), sticky="ew"
+        )
+        self._refresh_stats()
+
     def _build_log(self, row: int) -> None:
         log_frame = self._build_section_card("SYSTEM LOG")
         log_frame.grid(row=row, column=0, padx=16, pady=(0, 8), sticky="nsew")
@@ -378,6 +429,7 @@ class Application(ctk.CTk):
             on_button_lost=lambda: self._schedule(self._on_button_lost),
         )
         self._monitor.start()
+        self._monitor_started_at = time.time()
         self._start_accept_listener()
         self._refresh_status()
         self._log_event(f"Мониторинг запущен. Игра: {self._config.game_name}")
@@ -392,7 +444,7 @@ class Application(ctk.CTk):
         self._monitor.stop()
         self._monitor.join(timeout=2)
         self._monitor = None
-        self._stop_accept_listener()
+        self._monitor_started_at = None
         self._refresh_status()
         self._log_event("Мониторинг остановлен")
 
@@ -407,6 +459,9 @@ class Application(ctk.CTk):
     def _on_match_found(self) -> None:
         self.status_text.configure(text="MATCH DETECTED", text_color=NEON_MAGENTA)
         self.status_dot.configure(text_color=NEON_MAGENTA)
+        self._pending_match = True
+        self._stats.record_found()
+        self._refresh_stats()
         if self._accept_listener is not None and self._accept_listener.is_running:
             self._log_event("Матч найден! Кнопка приёма отправлена в Telegram.")
         else:
@@ -415,6 +470,10 @@ class Application(ctk.CTk):
 
     def _on_button_lost(self) -> None:
         self._log_event("Кнопка исчезла. Жду следующий матч.")
+        if self._pending_match:
+            self._pending_match = False
+            self._stats.record_missed()
+            self._refresh_stats()
         self._refresh_status()
 
     def _on_test(self) -> None:
@@ -431,9 +490,14 @@ class Application(ctk.CTk):
         if not token:
             self._log_event("Ошибка: bot_token не указан в настройках.")
             return
+        # Слушатель и диалог используют один и тот же getUpdates (иначе 409).
+        self._stop_accept_listener()
         self._log_event("Открываю подключение Telegram...")
         TelegramConnectDialog(
-            self, token=token, on_success=self._on_telegram_connected
+            self,
+            token=token,
+            on_success=self._on_telegram_connected,
+            on_close=self._start_accept_listener,
         )
 
     def _on_telegram_connected(self, chat_id: int) -> None:
@@ -456,10 +520,15 @@ class Application(ctk.CTk):
     # ---------- удалённый приём матча по кнопке в Telegram ----------
 
     def _start_accept_listener(self) -> None:
-        """Запускает прослушивание кнопки «ПРИНЯТЬ МАТЧ» (если подключён TG)."""
+        """Запускает прослушивание кнопок и команд бота (если подключён TG).
+
+        Слушатель работает всё время приложения, а не только во время
+        мониторинга: команды ``/status`` и ``/stats`` должны отвечать
+        всегда. Кнопка приёма сама не отправляется без accept_enabled.
+        """
         if self._telegram is None or not self._telegram.enabled:
             return
-        if not self._config.telegram.chat_id or not self._config.telegram.accept_enabled:
+        if not self._config.telegram.chat_id:
             return
         if self._accept_listener is not None and self._accept_listener.is_running:
             return
@@ -467,9 +536,10 @@ class Application(ctk.CTk):
             token=self._config.telegram.bot_token,
             chat_id=self._config.telegram.chat_id,
             on_accept=lambda: self._schedule(self._on_accept_from_phone),
+            on_message=self._on_telegram_message,
         )
         self._accept_listener.start()
-        self._log_event("Слушатель кнопки «ПРИНЯТЬ» запущен.")
+        self._log_event("Слушатель команд и кнопки «ПРИНЯТЬ» запущен.")
 
     def _stop_accept_listener(self) -> None:
         if self._accept_listener is None:
@@ -545,6 +615,9 @@ class Application(ctk.CTk):
         try:
             click_at(cx, cy)
             self._schedule(lambda: self._log_event("Кнопка принятия нажата."))
+            self._pending_match = False
+            self._stats.record_accepted()
+            self._schedule(self._refresh_stats)
             self._telegram_result(ACCEPT_ANSWER_OK.format(game=self._config.game_name))
         except ClickError as exc:
             self._schedule(lambda e=exc: self._log_event(f"Ошибка клика: {e}"))
@@ -566,6 +639,150 @@ class Application(ctk.CTk):
             name="telegram-result",
             daemon=True,
         ).start()
+
+    # ---------- команды бота ----------
+
+    def _on_telegram_message(self, text: str) -> Optional[str]:
+        """Обрабатывает текстовую команду бота; None — игнорировать.
+
+        Вызывается из потока слушателя, поэтому побочные эффекты
+        (тест, приём матча) планируются в GUI-поток через ``_schedule``,
+        а текст ответа возвращается синхронно для отправки.
+        """
+        command = text.strip().lower()
+        if command == "/start":
+            return self._help_text()
+        if command in ("/help", "/commands"):
+            return self._help_text()
+        if command == "/version":
+            return f"⚙️ Nexus Matchlink v{APP_VERSION}"
+        if command == "/status":
+            return self._status_text()
+        if command == "/stats":
+            return self._stats_text()
+        if command == "/test":
+            self._schedule(self._on_test)
+            return "📡 Тестовое уведомление отправлено."
+        if command == "/accept":
+            self._schedule(self._on_accept_from_phone)
+            return "🎮 Принимаю матч... Результат придёт отдельно."
+        return None
+
+    @staticmethod
+    def _help_text() -> str:
+        return (
+            "👋 Nexus Matchlink — уведомления о найденных матчах.\n\n"
+            "Команды:\n"
+            "/status — статус мониторинга\n"
+            "/stats — статистика матчей\n"
+            "/accept — принять текущий матч\n"
+            "/test — тестовое уведомление\n"
+            "/version — версия приложения\n"
+            "/help — эта справка\n\n"
+            "Матч также можно принять, нажав кнопку под уведомлением."
+        )
+
+    def _status_text(self) -> str:
+        running = self._monitor is not None and self._monitor.is_running
+        game = self._config.game_name
+        tg = "подключён" if self._telegram_ready() else "не подключён"
+        if running:
+            return (
+                f"🟢 Мониторинг: АКТИВЕН\n"
+                f"🎮 Игра: {game}\n"
+                f"⏱ Аптайм: {self._monitor_uptime()}\n"
+                f"📡 Telegram: {tg}"
+            )
+        return f"🔴 Мониторинг: остановлен\n🎮 Игра: {game}\n📡 Telegram: {tg}"
+
+    def _stats_text(self) -> str:
+        stats = self._stats.snapshot()
+        return (
+            f"📊 Статистика\n\n"
+            f"Найдено матчей: {stats['matches_found']}\n"
+            f"Принято: {stats['matches_accepted']}\n"
+            f"Упущено: {stats['matches_missed']}\n"
+            f"Последний матч: {stats['last_match_at'] or '—'}"
+        )
+
+    def _monitor_uptime(self) -> str:
+        if self._monitor_started_at is None:
+            return "—"
+        seconds = max(0, int(time.time() - self._monitor_started_at))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours} ч {minutes} мин"
+        if minutes:
+            return f"{minutes} мин {secs} с"
+        return f"{secs} с"
+
+    # ---------- настройки ----------
+
+    def _on_toggle(self, kind: str) -> None:
+        """Переключает настройку (sound/screenshot) и сохраняет конфиг."""
+        if kind == "screenshot":
+            enabled = not self._config.telegram.send_screenshot
+            self._config = replace(
+                self._config,
+                telegram=replace(self._config.telegram, send_screenshot=enabled),
+            )
+            if self._monitor is not None:
+                self._monitor.set_send_screenshot(enabled)
+            self._log_event(
+                f"Скриншот в уведомлениях: {'ВКЛ' if enabled else 'ВЫКЛ'}"
+            )
+        elif kind == "sound":
+            enabled = not self._config.sound.enabled
+            self._config = replace(
+                self._config,
+                sound=replace(self._config.sound, enabled=enabled),
+            )
+            self._log_event(f"Звук: {'ВКЛ' if enabled else 'ВЫКЛ'}")
+        else:
+            return
+        save_config(self._config)
+        self._notifiers = build_notifiers(self._config)
+        self._telegram = next(
+            (n for n in self._notifiers if isinstance(n, TelegramNotifier)), None
+        )
+        if self._monitor is not None and self._monitor.is_running:
+            self._monitor.set_notifiers(self._notifiers)
+        self._update_toggle_buttons()
+
+    def _update_toggle_buttons(self) -> None:
+        shot = self._config.telegram.send_screenshot
+        sound = self._config.sound.enabled
+        self.shot_button.configure(
+            text=f"SCREENSHOT: {'ON' if shot else 'OFF'}",
+            text_color=NEON_CYAN if shot else MUTED,
+            border_color=NEON_CYAN if shot else MUTED,
+        )
+        self.sound_button.configure(
+            text=f"SOUND: {'ON' if sound else 'OFF'}",
+            text_color=GOLD if sound else MUTED,
+            border_color=GOLD if sound else MUTED,
+        )
+
+    def _refresh_stats(self) -> None:
+        """Обновляет строку статистики в интерфейсе."""
+        if not hasattr(self, "stats_label"):
+            return
+        stats = self._stats.snapshot()
+        last = stats["last_match_at"] or "—"
+        self.stats_label.configure(
+            text=(
+                f"FOUND {stats['matches_found']}   ·   "
+                f"ACCEPTED {stats['matches_accepted']}   ·   "
+                f"MISSED {stats['matches_missed']}   ·   "
+                f"LAST {last}"
+            )
+        )
+
+    def _schedule_stats_refresh(self) -> None:
+        """Периодически обновляет статистику (после удалённых действий)."""
+        self._refresh_stats()
+        self._stats_job = self.after(2000, self._schedule_stats_refresh)
 
     # ---------- внутренние помощники ----------
 
@@ -661,6 +878,12 @@ class Application(ctk.CTk):
     def _on_close(self) -> None:
         self._stop_animation()
         self._stop_accept_listener()
+        if self._stats_job is not None:
+            try:
+                self.after_cancel(self._stats_job)
+            except Exception:
+                pass
+            self._stats_job = None
         if self._monitor is not None:
             self._monitor.stop()
             self._monitor.join(timeout=2)

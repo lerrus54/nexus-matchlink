@@ -8,6 +8,7 @@ __pycache__/
 # Логи и личные настройки
 logs/
 config/settings.json
+stats.json
 
 # Артефакты сборки .exe
 build/

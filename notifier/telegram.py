@@ -58,6 +58,10 @@ class TelegramApi:
             text=text,
         )
 
+    def send_message(self, chat_id: int, text: str) -> Any:
+        """Отправляет сообщение в чат (используется для ответа на команды)."""
+        return self._call("sendMessage", chat_id=chat_id, text=text)
+
 
 class TelegramPairer:
     """Автоматически определяет chat_id пользователя по уникальному коду.
@@ -257,11 +261,14 @@ class TelegramNotifier(BaseNotifier):
 
 
 class TelegramListener:
-    """Фоновый поток, слушает inline-кнопки бота (приём матча с телефона).
+    """Фоновый поток, слушает inline-кнопки и команды бота.
 
     Использует тот же getUpdates long-poll, что и ``TelegramPairer``, но
-    живёт всё время мониторинга. На нажатие кнопки отвечает вызовом
-    ``on_accept`` в контексте GUI-потока (через ``self._schedule``).
+    живёт всё время приложения. На нажатие кнопки отвечает вызовом
+    ``on_accept`` в контексте GUI-потока (через ``self._schedule`` у
+    вызывающего приложения). На команды вида ``/status`` отвечает через
+    ``on_message``: обработчик возвращает текст ответа, и слушатель
+    отправляет его в тот же чат.
     """
 
     CALLBACK_ACCEPT = TelegramNotifier.ACCEPT_CALLBACK
@@ -272,10 +279,12 @@ class TelegramListener:
         token: str,
         chat_id: int,
         on_accept: Callable[[], None],
+        on_message: Optional[Callable[[str], Optional[str]]] = None,
     ) -> None:
         self._api = TelegramApi(token)
         self._chat_id = chat_id
         self._on_accept = on_accept
+        self._on_message = on_message
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -330,9 +339,30 @@ class TelegramListener:
             for update in updates:
                 offset = int(update.get("update_id", 0)) + 1
                 callback = update.get("callback_query") or {}
-                if not callback:
+                if callback:
+                    self._handle_callback(callback)
                     continue
-                self._handle_callback(callback)
+                message = update.get("message") or {}
+                chat = message.get("chat") or {}
+                if chat.get("id") == self._chat_id:
+                    text = (message.get("text") or "").strip()
+                    if text.startswith("/"):
+                        self._handle_command(text)
+
+    def _handle_command(self, text: str) -> None:
+        """Отвечает на команду вида /status, если есть обработчик."""
+        if self._on_message is None:
+            return
+        try:
+            reply = self._on_message(text)
+        except Exception as exc:
+            logger.exception("Ошибка в обработчике команды %r", text)
+            reply = f"❌ Внутренняя ошибка: {exc}"
+        if reply:
+            try:
+                self._api.send_message(self._chat_id, reply)
+            except Exception as exc:
+                logger.warning("Не удалось отправить ответ на команду: %s", exc)
 
     def _handle_callback(self, callback: dict[str, Any]) -> None:
         query_id = callback.get("id")

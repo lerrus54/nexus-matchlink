@@ -34,10 +34,12 @@ class TelegramConnectDialog(ctk.CTkToplevel):
         master: ctk.CTk,
         token: str,
         on_success: Callable[[int], None],
+        on_close: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(master)
         self._pairer = TelegramPairer(token)
         self._on_success = on_success
+        self._on_close = on_close
         self._code = self._pairer.generate_code()
         self._result: Optional[int] = None
         self._error: Optional[str] = None
@@ -230,7 +232,7 @@ class TelegramConnectDialog(ctk.CTkToplevel):
                 text=f"Подключено! Chat ID: {self._result}", text_color=GREEN
             )
             self._on_success(self._result)
-            self._poll_job = self.after(1500, self.destroy)
+            self._poll_job = self.after(1500, self._finish_success)
             return
 
         remaining = max(0, int(self._deadline - time.monotonic()))
@@ -254,6 +256,12 @@ class TelegramConnectDialog(ctk.CTkToplevel):
         self.status_label.configure(text=text, text_color=color)
         self._poll_job = self.after(500, self._poll)
 
+    def _finish_success(self) -> None:
+        self.grab_release()
+        self.destroy()
+        if self._on_close is not None:
+            self._on_close()
+
     def _cancel(self) -> None:
         self._stop_event.set()
         if self._poll_job is not None:
@@ -263,6 +271,8 @@ class TelegramConnectDialog(ctk.CTkToplevel):
                 pass
         self.grab_release()
         self.destroy()
+        if self._on_close is not None:
+            self._on_close()
 
 
 __all__ = ["TelegramConnectDialog"]
