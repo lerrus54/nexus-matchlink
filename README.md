@@ -9,6 +9,8 @@
 
 > **Официальный канал релизов:** [t.me/nexus_matchlink](https://t.me/nexus_matchlink)
 > — там всегда свежий `.exe`, инструкции и новости.
+>
+> **Исходный код:** [github.com/lerrus54/nexus-matchlink](https://github.com/lerrus54/nexus-matchlink)
 
 ## Возможности
 
